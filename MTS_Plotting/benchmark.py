@@ -9,7 +9,6 @@ import statistics
 from datetime import datetime, timezone
 
 from matplotlib import pyplot as plt
-from matplotlib.lines import Line2D
 import matplotlib as mpl
 
 from .runs import discover
@@ -144,7 +143,8 @@ def figure_name(y, *, x, color, gradient=None, fixed=None):
     return "_".join(parts) + ".pdf"
 
 
-def plot_benchmark(rows, path, *, y, x, color, gradient=None, fixed=None):
+def plot_benchmark(rows, path, *, y, x, color, gradient=None, fixed=None,
+                   legend=None, xlim=None, ylim=None):
     """Assign benchmark properties to visual slots; never pool an unassigned sweep.
 
     Each point is the mean of per-seed timings, with sample SD across seeds.
@@ -209,7 +209,8 @@ def plot_benchmark(rows, path, *, y, x, color, gradient=None, fixed=None):
                     ink = cmap(tint)
                     ax.plot([coordinates[p["x"]] for p in curve], [p["mean"] for p in curve],
                             color=ink, marker=("o", "s", "^", "D", "v", "P")[i],
-                            markerfacecolor="none")
+                            markerfacecolor="none", label=str(category) if not gradient else
+                            f"{category}, {gradient}={shade}")
                     replicated = [p for p in curve if p["sd"] is not None]
                     if replicated:
                         ax.errorbar([coordinates[p["x"]] for p in replicated],
@@ -224,26 +225,19 @@ def plot_benchmark(rows, path, *, y, x, color, gradient=None, fixed=None):
             else:
                 ax.set_ylim(bottom=0)
             ax.set_xticks([coordinates[v] for v in positions], labels=[str(v) for v in positions])
-            handles = [Line2D([], [], color=mpl.colormaps[inks[value]](.8),
-                              marker=("o", "s", "^", "D", "v", "P")[i],
-                              markerfacecolor="none", label=str(value))
-                       for i, value in enumerate(categories)]
-            if gradient:
-                handles += [Line2D([], [], linestyle="none", label="\n" + DIMENSIONS[gradient])]
-                handles += [Line2D([], [], color=mpl.colormaps["Greys"](
-                    .45 + .5*j/max(1, len(shades)-1)), label=str(value))
-                           for j, value in enumerate(shades)]
-                ax.legend(handles=handles, title=DIMENSIONS[color], title_fontsize=8,
-                          frameon=False, loc="upper left", bbox_to_anchor=(1, 1))
-            else:
-                ax.legend(handles=handles, frameon=False)
+            if xlim is not None:
+                ax.set_xlim(xlim)
+            if ylim is not None:
+                ax.set_ylim(ylim)
+            ax.legend(**({"loc": "best", "ncols": 1} | (legend or {}) | {"frameon": True}))
             fig.savefig(path, bbox_inches="tight")
         finally:
             plt.close(fig)
     return points
 
 
-def plot_suite(rows, destination, *, metrics, comparisons, views, audit=None, report_path=None):
+def plot_suite(rows, destination, *, metrics, comparisons, views, audit=None, report_path=None,
+               legend=None):
     """A small product of explicit slot assignments, rendered by one plot function."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
@@ -262,8 +256,10 @@ def plot_suite(rows, destination, *, metrics, comparisons, views, audit=None, re
                     filename = figure_name(**slots)
                     if any(f["file"] == filename for f in figures):
                         raise ValueError(f"Duplicate figure specification: {filename}")
-                    points = plot_benchmark(rows, destination / filename, **slots)
-                    figures.append(dict(file=filename, points=len(points), **slots))
+                    options = {k: view[k] for k in ("legend", "xlim", "ylim") if k in view}
+                    options.setdefault("legend", legend)
+                    points = plot_benchmark(rows, destination / filename, **slots, **options)
+                    figures.append(dict(file=filename, points=len(points), **slots, **options))
     report = dict(audit=audit, created_at=datetime.now(timezone.utc).isoformat(), figures=figures)
     if report_path is not None:
         report_path = Path(report_path)

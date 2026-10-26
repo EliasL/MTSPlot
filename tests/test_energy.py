@@ -2,10 +2,34 @@ import unittest
 import numpy as np
 
 from MTM_Math.energy import ContiEnergy, PieceWiseQuadratic, rotation, stretch_from_C
-from MTM_Math.reduction import lagrange_reduction
+from MTM_Math.reduction import lagrange_reduction, plastic_reduction, plastic_reduction_components
 
 
 class EnergyTests(unittest.TestCase):
+    def test_plastic_reduction_preserves_metric_and_unit_shear_choice(self):
+        gamma = np.array([4.25, -3.5, 2.75])
+        F = np.broadcast_to(np.eye(2), (3, 2, 2)).copy()
+        F[:, 0, 1] = gamma
+        C = np.concatenate((F.swapaxes(-1, -2) @ F, F @ F.swapaxes(-1, -2)))
+        original = C.copy()
+        reduced, M = plastic_reduction(C, compute_M=True)
+        np.testing.assert_allclose(reduced, M.swapaxes(-1, -2) @ C @ M)
+        np.testing.assert_allclose(np.linalg.det(M), 1)
+        np.testing.assert_allclose(np.linalg.det(reduced), np.linalg.det(C))
+        self.assertTrue(np.all(np.abs(reduced[:, 0, 1]) <=
+                               .5*np.minimum(reduced[:, 0, 0], reduced[:, 1, 1])))
+        np.testing.assert_array_equal(C, original)
+        a, b, c, _ = plastic_reduction_components(1, 1+gamma**2, gamma)
+        np.testing.assert_allclose(a, reduced[:3, 0, 0])
+        np.testing.assert_allclose(b, reduced[:3, 1, 1])
+        np.testing.assert_allclose(c, reduced[:3, 0, 1])
+        _, tie_M = plastic_reduction([[2, 1.25], [1.25, 2]], loops=1, compute_M=True)
+        np.testing.assert_array_equal(tie_M, [[1, -1], [0, 1]])
+        with self.assertRaises(RuntimeError):
+            plastic_reduction(C, loops=1)
+        with self.assertRaises(ValueError):
+            plastic_reduction([[1, 2], [2, 1]])
+
     def test_gradient_tangent_and_rotation(self):
         F = np.array([[1.03, .12], [.02, .98]])
         h = 1e-6

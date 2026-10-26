@@ -1,4 +1,4 @@
-"""The benchmark's complete 32-figure specification. Run from any directory."""
+"""The benchmark's complete 24-figure specification. Run from any directory."""
 
 from pathlib import Path
 
@@ -22,9 +22,9 @@ def main():
         views=(
             dict(x="size", fixed={"threads": 16}),
             dict(x="size", gradient="threads"),
-            dict(x="threads", fixed={"size": 400}),
             dict(x="threads", gradient="size"),
         ),
+        legend=dict(loc="best", ncols=1),
         audit=audit,
     )
 

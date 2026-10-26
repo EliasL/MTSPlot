@@ -16,6 +16,10 @@ def main():
     parser.add_argument("--color", choices=DIMENSIONS, default="preconditioner")
     parser.add_argument("--gradient", choices=DIMENSIONS)
     parser.add_argument("--fixed", default="{}", help='JSON selection, e.g. {"size":400,"reconnection":"none"}')
+    parser.add_argument("--legend-loc", default="best")
+    parser.add_argument("--legend-ncols", type=int, default=1)
+    parser.add_argument("--xlim", nargs=2, type=float)
+    parser.add_argument("--ylim", nargs=2, type=float)
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--save-summary", type=Path, help="Optionally save the printed JSON report outside figures")
     args = parser.parse_args()
@@ -26,7 +30,8 @@ def main():
         slots = dict(y=args.metric, x=args.x, color=args.color,
                      gradient=args.gradient, fixed=json.loads(args.fixed))
         path = args.output / figure_name(**slots)
-        plot_benchmark(rows, path, **slots)
+        plot_benchmark(rows, path, **slots, legend=dict(loc=args.legend_loc, ncols=args.legend_ncols),
+                       xlim=args.xlim, ylim=args.ylim)
         files.append(path)
     report = audit | dict(created_at=datetime.now(timezone.utc).isoformat(),
                           data=str(args.data.resolve()),

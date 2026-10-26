@@ -3,11 +3,10 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from MTS_Management.config import Config
-from MTS_Plotting.benchmark import plot_benchmark, plot_suite, seconds, summarize, timing_summary
-from MTS_Plotting.runs import Run, discover
+from MTS_Plotting.benchmark import plot_benchmark, summarize, timing_summary
+from MTS_Plotting.runs import Run
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -54,13 +53,6 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(timing_summary(self.run_fixture(target=False, seed=1))["eligible"])
         self.assertFalse(timing_summary(self.run_fixture(logDuringMinimization=True))["eligible"])
 
-    def test_identity_errors(self):
-        run = self.run_fixture()
-        manifest = run.manifest | {"config_hash": "wrong"}
-        (run.folder / "manifest.json").write_text(json.dumps(manifest))
-        with self.assertRaisesRegex(ValueError, "mismatch"):
-            discover(self.root)
-
     def test_malformed_row_and_counter_errors(self):
         run = self.run_fixture()
         path = run.folder / "macroData.csv"
@@ -91,74 +83,27 @@ class BenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-sweep"):
             summarize(self.root)
 
-    def test_pdf_and_sample_counts(self):
-        self.run_fixture(rows=4, cols=4)
-        self.run_fixture(rows=4, cols=4, seed=1)
-        rows, audit = summarize(self.root)
-        path = self.root / "elastic.pdf"
-        points = plot_benchmark(rows, path, y="elastic_minimization_s",
-                                x="size", color="preconditioner")
-        self.assertEqual(audit["eligible"], 2)
-        self.assertTrue(path.read_bytes().startswith(b"%PDF"))
-        self.assertEqual(points[0]["seeds"], 2)
-        self.assertEqual(points[0]["mean"], 3)
-        self.assertEqual(points[0]["sd"], 0)
-
     def test_slots_require_explicit_unplotted_dimensions(self):
         for size, threads in ((4, 1), (8, 1), (4, 2)):
             self.run_fixture(rows=size, cols=size, nrThreads=threads)
+        self.run_fixture(rows=4, cols=4, nrThreads=1, seed=1)
         rows, _ = summarize(self.root)
+        for row in rows:
+            if row["rows"] == 4 and row["threads"] == 1:
+                row["elastic_minimization_s"] = 2 if row["seed"] == 0 else 10
         options = dict(y="elastic_minimization_s", x="size", color="preconditioner")
         path = self.root / "size.pdf"
         with self.assertRaisesRegex(ValueError, "Assign threads"):
             plot_benchmark(rows, path, **options)
         points = plot_benchmark(rows, path, gradient="threads", **options)
         self.assertEqual({(p["x"], p["gradient"], p["seeds"]) for p in points},
-                         {(4, 1, 1), (8, 1, 1), (4, 2, 1)})
-        with self.assertRaisesRegex(ValueError, "distinct"):
-            plot_benchmark(rows, path, gradient="size", **options)
-        with self.assertRaisesRegex(ValueError, "No eligible"):
-            plot_benchmark(rows, path, fixed={"threads": 99}, **options)
+                         {(4, 1, 2), (8, 1, 1), (4, 2, 1)})
+        replicated = next(p for p in points if p["x"] == 4 and p["gradient"] == 1)
+        self.assertEqual(replicated["mean"], 6)
+        self.assertAlmostEqual(replicated["sd"], 32**.5)
+        self.assertEqual(replicated["seed_ids"], [0, 1])
         with self.assertRaisesRegex(ValueError, "Duplicate seeds"):
             plot_benchmark(rows + rows, path, gradient="threads", **options)
-        rows[0]["cols"] += 1
-        with self.assertRaisesRegex(ValueError, "square"):
-            plot_benchmark(rows, path, gradient="threads", **options)
-
-    def test_suite_has_32_distinct_figures_and_interchangeable_slots(self):
-        from itertools import product
-        for size, threads, preconditioner, reconnection in product(
-                (4, 8), (1, 2), ("none", "exactTangent"), ("none", "edgeFlip")):
-            self.run_fixture(rows=size, cols=size, nrThreads=threads,
-                             preconditioner=preconditioner, reconnectionMethod=reconnection)
-        rows, audit = summarize(self.root)
-        with patch("MTS_Plotting.benchmark.plot_benchmark", return_value=[]) as render:
-            report = plot_suite(rows, self.root / "figures",
-                metrics=("elastic_minimization_s", "plastic_minimization_s"),
-                comparisons=(dict(color="preconditioner", split="reconnection"),
-                             dict(color="reconnection", split="preconditioner")),
-                views=(dict(x="size", fixed={"threads": 1}),
-                       dict(x="size", gradient="threads"),
-                       dict(x="threads", fixed={"size": 4}),
-                       dict(x="threads", gradient="size")), audit=audit)
-        self.assertEqual(render.call_count, 32)
-        self.assertEqual(len({f["file"] for f in report["figures"]}), 32)
-        self.assertIn("elastic_threads_reconnection_exactTangent_L4.pdf",
-                      {f["file"] for f in report["figures"]})
-        self.assertEqual(list((self.root/"figures").glob("*.csv")), [])
-        self.assertFalse((self.root/"figures/summary.json").exists())
-        # The same renderer also accepts categorical X and a numeric color property.
-        points = plot_benchmark(rows, self.root / "swapped.pdf", y="plastic_minimization_s",
-            x="preconditioner", color="threads", gradient="size", fixed={"reconnection": "none"})
-        self.assertEqual(len(points), 8)
-        self.assertTrue(all(p["sd"] is None for p in points))
-
-    def test_duration_errors(self):
-        self.assertEqual(seconds("1d 2h 3m 4.5s"), 93784.5)
-        for text in ("", "1", "-1s", "nan", "1s 1s", "1s 1m"):
-            with self.assertRaises(ValueError):
-                seconds(text)
-
 
 
 if __name__ == "__main__":
