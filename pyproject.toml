@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MTS_Plotting"
+version = "0.1.0"
+description = "Small publication figures for current MTS2D simulations"
+requires-python = ">=3.11"
+dependencies = ["MTS_Management>=0.1.0", "numpy", "matplotlib"]
+
+[project.scripts]
+mtsplot = "MTS_Plotting.__main__:main"
+
+[project.optional-dependencies]
+math = ["sympy"]
+
+[tool.setuptools.packages.find]
+include = ["MTS_Plotting*", "MTM_Math*"]
