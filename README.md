@@ -109,7 +109,7 @@ then download completed results:
 
 ```sh
 python examples/fetch_benchmark.py ../MTSManager/sites.toml \
-  ../MTSManager/campaigns/magi_benchmark_oct26/campaign.json data/magi_benchmark_oct26
+  ../MTSManager/campaigns/magi_benchmark_oct26/simulations.json data/magi_benchmark_oct26
 MPLBACKEND=Agg python examples/benchmark_figures.py
 ```
 

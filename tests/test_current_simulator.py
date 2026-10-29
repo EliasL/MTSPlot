@@ -1,25 +1,24 @@
 """Energy comparisons with the current simulator, owned by MTM_Math."""
 
-from contextlib import redirect_stdout
-import io
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import os
 import numpy as np
 
 from MTS_Management.config import Config
 from MTS_Management.data import read_macros
 from MTS_Management.provenance import verify_schema
-from MTS_Management.runner import PACKAGE_ROOT, prepare, execute
+from MTS_Management.runner import PACKAGE_ROOT
 from MTM_Math.energy import ContiEnergy
 
-EXE = PACKAGE_ROOT / "build/MTS2D"
 SOURCE = PACKAGE_ROOT.parent / "MTS2D"
+EXE = Path(os.environ.get("MTS_TEST_BINARY", SOURCE / "build/MTS2D")).resolve()
 
 
 class CurrentEnergyTests(unittest.TestCase):
-    @unittest.skipUnless(EXE.exists() and (EXE.parent / "build-manifest.json").exists(),
+    @unittest.skipUnless(EXE.exists(),
                          "Build the current simulator for energy integration tests")
     def test_macro_energy_density(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -27,10 +26,11 @@ class CurrentEnergyTests(unittest.TestCase):
             config = Config(rows=4, cols=4, initialGuessNoise=0, boundary="periodic",
                             totalLoad=.003, loadIncrement=.001, loading="noRelaxation",
                             writeDumps=False, writeMeshVTUs=False)
-            attempt = prepare(config, executable=EXE, output_root=root/"output", state_dir=root/"state")
-            with redirect_stdout(io.StringIO()):
-                execute(attempt)
-            rows = read_macros(attempt.parent.parent/"macroData.csv")
+            folder = root / config.folder_name()
+            folder.mkdir()
+            config.write(folder / "config.conf")
+            subprocess.run([str(EXE), str(folder)], check=True, capture_output=True, text=True)
+            rows = read_macros(folder / "macroData.csv")
             for row in rows:
                 gamma = float(row["load"])
                 energy = ContiEnergy.energy_from_simple_shear(gamma)

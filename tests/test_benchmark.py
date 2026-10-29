@@ -67,7 +67,7 @@ class BenchmarkTests(unittest.TestCase):
     def test_campaign_missing_and_foreign_data(self):
         run = self.run_fixture()
         config2 = Config(**(run.config.as_dict() | {"seed": 1}))
-        campaign = self.root / "campaign.json"
+        campaign = self.root / "simulations.json"
         campaign.write_text(json.dumps(dict(name="Test", runs=[
             dict(label="Run0", settings=run.config.as_dict()),
             dict(label="Run1", settings=config2.as_dict())])))

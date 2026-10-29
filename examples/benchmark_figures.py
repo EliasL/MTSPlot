@@ -9,7 +9,7 @@ def main():
     workspace = Path(__file__).resolve().parents[2]
     rows, audit = summarize(
         workspace / "MTSPlot/data/magi_benchmark_oct26",
-        campaign=workspace / "MTSManager/campaigns/magi_benchmark_oct26/campaign.json",
+        campaign=workspace / "MTSManager/campaigns/magi_benchmark_oct26/simulations.json",
     )
     plot_suite(
         rows,
