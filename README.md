@@ -51,6 +51,29 @@ It returns the Matplotlib figure and axes so you can adjust the plot before savi
 
 ## Compare simulation timings
 
+The desktop Plot panel selects campaigns and discovers their varied parameters.
+It supports response curves, scalar reductions of macro columns and the timing
+summaries below. Unused varied parameters require fixed selections. Plotting
+reads a selected local collection and reports missing or partial runs.
+
+`MTS_Plotting.campaign_plot.prepare(campaign, data, selections)` returns plotted
+values and warnings; `plot(campaign, data, pdf, selections)` writes a vector PDF.
+Selections specify `x`, `y`, optional `color` and `gradient`, `fixed`, `seed`
+(`"all"` or one integer), and `normalization` (`"none"`, `"L"` or `"N"`, where N
+is rows × cols). Macro-column scalar reductions use `reduction` (`"last"`,
+`"first"`, `"mean"`, `"min"` or `"max"`). Normalization precedes seed averaging.
+Response means align by load, using linear interpolation only over the common
+range when grids differ, with a warning. Uncertainty is sample standard
+deviation across seeds. No extrapolation or missing-seed imputation is applied.
+For parametric response plots, X is the seed mean and uncertainty is shown on Y.
+Independent `xscale` and `yscale` selections accept `"linear"` or `"log"`;
+logarithmic axes reject nonpositive data. `legend_style` accepts `"compact"`,
+`"full"` or `"custom"`, with custom parameter labels in `legend_aliases`.
+Compact defaults include L for size, t for threads, R for reconnection and C for
+preconditioner. Direct PNG previews use the same drawing function as PDF export.
+Reduced numerical data is cached separately from appearance settings and
+invalidated when configuration, manifest, campaign or macro data files change.
+
 Timing plots assign a measured quantity to Y and simulation properties to X,
 color and an optional color gradient. For example, compare elastic minimization
 time across square system sizes, using colors for preconditioners and shades for

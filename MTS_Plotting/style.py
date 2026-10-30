@@ -4,7 +4,8 @@ import matplotlib as mpl
 from matplotlib import pyplot as plt
 
 STYLE = {
-    "font.family": "serif", "mathtext.fontset": "cm", "font.size": 10,
+    "text.usetex": False,
+    "font.family": "serif", "font.serif": ["DejaVu Serif"], "mathtext.fontset": "cm", "font.size": 10,
     "axes.labelsize": 11, "legend.fontsize": 8, "legend.frameon": True,
     "legend.loc": "best", "axes.titlesize": 10,
     "axes.spines.top": False, "axes.spines.right": False,
