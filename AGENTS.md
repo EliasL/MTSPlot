@@ -31,3 +31,11 @@ The user will review the plots and explicitly request any visual changes.
 Keep data retrieval explicit; plotting must never submit or modify simulations.
 Preserve the distinction between partial data, strain-limit stops and target completion.
 Run `python -m unittest discover -s tests -v` with `MPLBACKEND=Agg`.
+
+# Element tracking
+
+Follow [Element identity and transport](../AGENTS.md#element-identity-and-transport).
+Track edge-flip histories by explicit element ID, or verified native cell order;
+do not discard a history because its reference-node triplet changes. Check
+uniqueness and coverage, and raise errors for unsupported identity mappings.
+This does not authorize adding legacy readers to this current-simulator project.
