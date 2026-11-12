@@ -27,8 +27,8 @@ class Run:
         termination = json.loads(path.read_text())["termination"] if path.exists() else None
         return cls(folder, config, manifest, termination)
 
-    def macros(self):
-        return read_macros(self.folder / "macroData.csv")
+    def macros(self, *, allow_incomplete_tail=False):
+        return read_macros(self.folder / "macroData.csv", allow_incomplete_tail=allow_incomplete_tail)
 
 
 def discover(root):

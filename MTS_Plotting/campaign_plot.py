@@ -1,6 +1,5 @@
 """Campaign-selected response curves and scalar comparisons from local runs."""
 
-import csv
 import json
 from collections import defaultdict
 from functools import lru_cache
@@ -10,6 +9,9 @@ import numpy as np
 
 from MTS_Management.campaign import campaign_entries
 from MTS_Management.config import DEFAULTS
+from MTS_Management.data import macro_reader, seed_group_fields
+from MTS_Management.files import file_digest
+
 from .runs import Run
 
 LABELS = {
@@ -30,13 +32,35 @@ COMMON_Y = ["avg_sigma12", "avg_energy", "total_energy", "avg_sigma11", "avg_sig
 APPEARANCE = {"ncols", "legend_loc", "legend_style", "legend_aliases", "xlim", "ylim", "xscale", "yscale", "show_all", "xlabel", "ylabel"}
 
 
-def definition(path):
-    name, entries = campaign_entries(path)
-    square = all(c["rows"] == c["cols"] for c, _ in entries)
-    settings = {c.config_hash: parameters(c, square) for c, _ in entries}
+def plot_definition(path, run_manifests=None):
+    if run_manifests is not None:
+        anchor = Path(path)
+        if anchor.name not in run_manifests:
+            raise ValueError("The plot selection must include the selected simulation.")
+        runs = {}
+        for name, identity in run_manifests.items():
+            folder = anchor.with_name(name)
+            manifest = folder / "manifest.json"
+            if folder.is_symlink() or not manifest.is_file() or file_digest(manifest) != identity:
+                raise ValueError(f"Simulation data changed: {folder}. Select the simulation again in Monitor data.")
+            run = Run.read(folder)
+            if run.config.config_hash in runs:
+                raise ValueError(f"Duplicate configuration: {folder}")
+            runs[run.config.config_hash] = run
+        name, configs = "Monitor selection", [run.config for run in runs.values()]
+        groups = {seed_group_fields(config.as_dict())["settings_group"] for config in configs}
+        executables = {run.manifest["executable_sha256"] for run in runs.values()}
+        if len(groups) != 1 or len(executables) != 1:
+            raise ValueError("The selected runs must differ only by seed and use the same executable.")
+    else:
+        name, entries = campaign_entries(path)
+        configs = [config for config, _ in entries]
+        runs = None
+    square = all(c["rows"] == c["cols"] for c in configs)
+    settings = {c.config_hash: parameters(c, square) for c in configs}
     values = {k: sorted({s[k] for s in settings.values()}) for k in next(iter(settings.values()))}
     varied = {k: v for k, v in values.items() if len(v) > 1}
-    return name, settings, varied
+    return name, settings, varied, runs
 
 
 def parameters(config, square):
@@ -60,28 +84,73 @@ def number(value, key):
     return float(value)
 
 
-def describe(campaign, sources, root=None):
+def partial_macro_csv(path):
+    return (path.name == "macroData.csv" and (path.parent / "manifest.json").is_file()
+            and not (path.parent / "termination.json").exists())
+
+
+def csv_rows(stream, path):
+    reader = macro_reader(stream, allow_incomplete_tail=partial_macro_csv(path))
+    fields = reader.fieldnames
+    if not fields or any(not field.strip() for field in fields) or len(set(fields)) != len(fields):
+        raise ValueError(f"CSV requires distinct, nonempty column names: {path}")
+    for row in reader:
+        if None in row or any(value is None for value in row.values()):
+            raise ValueError(f"Malformed CSV row at line {reader.line_num}: {path}")
+        yield row
+
+
+def describe_csv(path):
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        first = next(csv_rows(stream, path), {})
+    numeric = []
+    for key, value in first.items():
+        try:
+            if np.isfinite(number(value, key)):
+                numeric.append(key)
+        except ValueError:
+            pass
+    if len(numeric) < 2:
+        raise ValueError("The CSV needs at least two numeric columns and a data row.")
+    quantities = {key: {"label": LABELS.get(key, key), "kind": "macro", "available": True} for key in numeric}
+    return {"campaign": path.name, "parameters": {}, "seeds": [], "labels": {}, "quantities": quantities,
+            "sources": [], "data": str(path), "expected": 1, "available": 1, "square": False,
+            "reductions": REDUCTIONS, "abbreviations": {},
+            "common_axes": {"x": [key for key in ("load", "accumulated_load") if key in quantities] + numeric,
+                            "y": [key for key in COMMON_Y if key in quantities] + numeric}}
+
+
+def describe(campaign, sources, root=None, *, run_manifests=None):
     """Inspect saved definitions and CSV headers/first rows, without remote reads."""
+    if run_manifests is None and Path(campaign).suffix.lower() == ".csv":
+        return describe_csv(Path(campaign))
     from .benchmark import METRICS
-    name, expected, varied = definition(campaign)
-    collections = [{"path": str(Path(p).resolve()), "runs": len(matching_folders(p, expected))}
-                   for p in dict.fromkeys(map(str, sources)) if Path(p).is_dir()]
-    collections = sorted((c for c in collections if c["runs"]), key=lambda c: (-c["runs"], c["path"]))
-    root = str(Path(root).expanduser().resolve()) if root else (collections[0]["path"] if collections else "")
-    folders = matching_folders(root, expected) if root else []
+    name, expected, varied, selected_runs = plot_definition(campaign, run_manifests)
+    monitor = selected_runs is not None
+    if monitor:
+        root, collections = str(campaign), []
+        folders = [run.folder for run in selected_runs.values()]
+    else:
+        collections = [{"path": str(Path(p).resolve()), "runs": len(matching_folders(p, expected))}
+                       for p in dict.fromkeys(map(str, sources)) if Path(p).is_dir()]
+        collections = sorted((c for c in collections if c["runs"]), key=lambda c: (-c["runs"], c["path"]))
+        root = str(Path(root).expanduser().resolve()) if root else (collections[0]["path"] if collections else "")
+        folders = matching_folders(root, expected) if root else []
     available, headers = set(), set()
+    populated = 0
     for folder in folders:
         path = folder / "macroData.csv"
         if not path.exists():
             continue
         with path.open(newline="") as stream:
-            reader = csv.DictReader(stream)
+            reader = macro_reader(stream, allow_incomplete_tail=monitor and not (folder / "termination.json").exists())
             if not reader.fieldnames or "load" not in reader.fieldnames or len(set(reader.fieldnames)) != len(reader.fieldnames):
                 raise ValueError(f"Invalid macro CSV header: {path}")
             headers.update(reader.fieldnames or [])
             first = next(reader, {})
             if None in first or any(v is None for v in first.values()):
                 raise ValueError(f"Malformed macro CSV: {path}")
+            populated += bool(first)
             for key, value in first.items():
                 try:
                     if np.isfinite(number(value, key)):
@@ -97,7 +166,8 @@ def describe(campaign, sources, root=None):
     parameter_order += sorted(varied.keys() - set(parameter_order))
     return {"campaign": name, "parameters": varied, "seeds": sorted({s["seed"] for s in expected.values()}),
             "labels": {k: LABELS.get(k, k) for k in varied}, "quantities": quantities,
-            "sources": collections, "data": root, "expected": len(expected), "available": len(folders),
+            "sources": collections, "data": root, "expected": len(expected),
+            "available": populated if monitor else len(folders),
             "square": all("size" in s for s in expected.values()), "reductions": REDUCTIONS,
             "common_axes": {"x": ["load", "accumulated_load", "completed_steps", *parameter_order], "y": COMMON_Y},
             "abbreviations": {k: ABBREVIATIONS.get(k, k) for k in varied}}
@@ -156,11 +226,26 @@ def align_seeds(samples):
 
 def prepare(campaign, root, spec, schema=None):
     from .benchmark import METRICS, timing_summary
-    schema = schema or describe(campaign, [root], root)
+    run_manifests = spec.get("run_manifests")
+    schema = schema or describe(campaign, [root], root, run_manifests=run_manifests)
     errors = compatibility(schema, spec)
     if errors:
         raise ValueError(" ".join(errors))
-    _, expected, varied = definition(campaign)
+    if run_manifests is None and Path(campaign).suffix.lower() == ".csv":
+        if spec.get("normalization", "none") != "none":
+            raise ValueError("System-size normalization requires a simulation selection.")
+        path = Path(campaign)
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            values = [(number(row[spec["x"]], spec["x"]), number(row[spec["y"]], spec["y"]))
+                      for row in csv_rows(stream, path)]
+        if not values or not np.all(np.isfinite(values)):
+            raise ValueError("The selected CSV columns must contain finite numeric values.")
+        x, y = map(list, zip(*values))
+        warnings = ["The simulation has no termination record. The CSV contains partial data."] if partial_macro_csv(path) else []
+        return {"mode": "curve", "series": [dict(color=None, gradient=None, x=x, mean=y, sd=None)],
+                "warnings": warnings, "runs": 1, "expected": 1}
+    _, expected, varied, selected_runs = plot_definition(campaign, run_manifests)
+    monitor = selected_runs is not None
     fixed = spec.get("fixed", {})
     slots = {spec["x"], spec.get("color"), spec.get("gradient")}
     if set(fixed) - varied.keys() or set(fixed) & slots or "seed" in fixed:
@@ -175,7 +260,8 @@ def prepare(campaign, root, spec, schema=None):
     for key in varied.keys() - slots - fixed.keys() - {"seed"}:
         if len({s[key] for s in selected.values()}) > 1:
             raise ValueError(f"Assign {key} to a plotting role or hold it fixed.")
-    runs = [Run.read(p) for p in matching_folders(root, selected)]
+    runs = ([selected_runs[h] for h in selected] if monitor else
+            [Run.read(p) for p in matching_folders(root, selected)])
     if len({r.config.config_hash for r in runs}) != len(runs):
         raise ValueError("Duplicate configurations; choose one local copy per run.")
     if len({r.manifest["executable_sha256"] for r in runs}) > 1:
@@ -197,7 +283,7 @@ def prepare(campaign, root, spec, schema=None):
                 continue
             y = np.array([value / divisor])
         else:
-            rows = run.macros()
+            rows = run.macros(allow_incomplete_tail=monitor and run.termination is None)
             if not rows:
                 excluded += 1
                 continue
@@ -251,11 +337,18 @@ def prepare(campaign, root, spec, schema=None):
 
 def prepared_plot(campaign, root, spec):
     # Cache only reduced numerical data, never the much larger raw CSV tables.
-    campaign, root = Path(campaign).resolve(), Path(root).resolve()
-    _, expected, _ = definition(campaign)
-    paths = [campaign, campaign.with_name("metadata.json")]
-    paths += [folder / name for folder in matching_folders(root, expected)
-              for name in ("config.conf", "manifest.json", "macroData.csv", "termination.json")]
+    run_manifests = spec.get("run_manifests")
+    campaign = Path(campaign).absolute() if run_manifests is not None else Path(campaign).resolve()
+    root = Path(root).resolve()
+    if run_manifests is None and campaign.suffix.lower() == ".csv":
+        paths = [campaign, campaign.with_name("manifest.json"), campaign.with_name("termination.json")]
+    else:
+        _, expected, _, selected_runs = plot_definition(campaign, run_manifests)
+        paths = [] if selected_runs is not None else [campaign, campaign.with_name("metadata.json")]
+        folders = ([run.folder for run in selected_runs.values()] if selected_runs is not None else
+                   matching_folders(root, expected))
+        paths += [folder / name for folder in folders
+                  for name in ("config.conf", "manifest.json", "macroData.csv", "termination.json")]
     stamps = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else (str(p), None, None) for p in paths)
     selection = json.dumps({k: v for k, v in spec.items() if k not in APPEARANCE and k not in {"campaign", "data"}}, sort_keys=True)
     return _prepared(str(campaign), str(root), selection, stamps)
@@ -263,8 +356,9 @@ def prepared_plot(campaign, root, spec):
 
 @lru_cache(maxsize=4)
 def _prepared(campaign, root, selection, stamps):
-    schema = describe(campaign, [root], root)
-    return schema, prepare(campaign, root, json.loads(selection), schema)
+    spec = json.loads(selection)
+    schema = describe(campaign, [root], root, run_manifests=spec.get("run_manifests"))
+    return schema, prepare(campaign, root, spec, schema)
 
 
 def validate_axes(result, spec):
