@@ -57,6 +57,13 @@ def frame_schedule(frames, *, playback, fps, seconds_per_load, minimum_seconds):
     return indices
 
 
+def preview_frame_index(schedule, position):
+    offsets = {"first": 0, "middle": len(schedule) // 2, "last": -1}
+    if position not in offsets:
+        raise ValueError("Choose the first, middle, or last animation frame.")
+    return schedule[offsets[position]]
+
+
 def encoder_path(preferred=None):
     search = os.pathsep.join((os.environ.get("PATH", os.defpath), "/opt/homebrew/bin", "/usr/local/bin"))
     if not (path := shutil.which(preferred or os.environ.get("MTS_FFMPEG") or "ffmpeg", path=search)):
@@ -173,18 +180,21 @@ def energy_limits(minimum, maximum, lower_limit, upper_limit):
 
 
 def csv_display_limits(folder, frames, *, bounds_needed, energy_max_needed):
-    """Use accepted-state statistics only if every selected frame has a matching row."""
+    """Calculate fixed display limits from matching accepted-state rows."""
     if not bounds_needed and not energy_max_needed:
         return None, None
-    selected = {frame["step"]: frame["load"] for frame in frames}
+    selected = {}
+    for frame in frames:
+        step = frame["step"]
+        selected[step] = None if step in selected else frame["load"]
     data = {}
+    coordinates = ("minX", "minY", "maxX", "maxY")
     try:
         with (folder / "macroData.csv").open(newline="") as stream:
             reader = macro_reader(stream, allow_incomplete_tail=True)
             columns = reader.fieldnames or ()
             if len(set(columns)) != len(columns) or not {"load_step", "load"} <= set(columns):
                 return None, None
-            coordinates = ("minX", "minY", "maxX", "maxY")
             bounds_needed = bounds_needed and set(coordinates) <= set(columns)
             energy_max_needed = energy_max_needed and "max_energy" in columns
             names = (coordinates if bounds_needed else ()) + (("max_energy",) if energy_max_needed else ())
@@ -194,43 +204,57 @@ def csv_display_limits(folder, frames, *, bounds_needed, energy_max_needed):
                 step = int(row["load_step"])
                 if step not in selected:
                     continue
-                if step in data or not math.isclose(float(row["load"]), selected[step],
+                if step in data or selected[step] is None or not math.isclose(float(row["load"]), selected[step],
                                                     rel_tol=1e-10, abs_tol=5.01e-7):
-                    return None, None
-                data[step] = [float(row[name]) for name in names]
+                    data[step] = None
+                else:
+                    data[step] = [float(row[name]) for name in names]
     except (FileNotFoundError, TypeError, ValueError):
         return None, None
-    if data.keys() != selected.keys() or not data:
-        return None, None
-    values = np.array(list(data.values()))
-    if not np.all(np.isfinite(values)):
-        return None, None
+    matched = [row for row in data.values() if row is not None]
     bounds = None
-    if bounds_needed and np.all(values[:, 2:4] >= values[:, :2]):
-        bounds = np.array([values[:, :2].min(axis=0), values[:, 2:4].max(axis=0)])
-        # The macro writer uses 11 significant digits. Expand rounded bounds
-        # outwards so the contained mesh is visible with no display padding.
-        bounds += np.array([[-1.], [1.]]) * (1e-10 * np.abs(bounds))
-    maximum = float(values[:, -1].max()) if energy_max_needed else None
-    # max_energy is initialized to zero before reducing the element energies.
-    return bounds, maximum if maximum is not None and maximum > 0 else None
+    if bounds_needed:
+        matches = [row[:4] for row in matched if all(math.isfinite(value) for value in row[:4])
+                   and row[2] >= row[0] and row[3] >= row[1]]
+        if matches:
+            values = np.array(matches)
+            bounds = np.array([values[:, :2].min(axis=0), values[:, 2:4].max(axis=0)])
+            # Expand the CSV's rounded bounds so zero padding keeps the mesh visible.
+            bounds += np.array([[-1.], [1.]]) * (1e-10 * np.abs(bounds))
+    maximum = None
+    # The native accumulator uses zero as an upper bound for nonpositive energies.
+    if energy_max_needed:
+        maximum = max((row[-1] for row in matched if math.isfinite(row[-1]) and row[-1] >= 0),
+                      default=None)
+    return bounds, maximum
 
 
 def tiled_display(config, kind, tiling):
     return kind != "disk" and (tiling == "tile" or (tiling == "auto" and config["boundary"] == "periodic"))
 
 
-def display_limit_sources(folder, frames, *, kind, tiled, limit, lower_limit):
+def display_limit_sources(folder, frames, *, kind, tiled, limit, lower_limit, range_from_last_frame=False):
     bounds_needed = kind != "disk" and not tiled
     energy_max_needed = kind == "energy" and limit is None
     bounds, maximum = csv_display_limits(folder, frames, bounds_needed=bounds_needed,
-                                        energy_max_needed=energy_max_needed)
+                                        energy_max_needed=energy_max_needed and not range_from_last_frame)
     return bounds, maximum, (
         bounds_needed and bounds is None,
         kind == "energy" and lower_limit is None,
         energy_max_needed and maximum is None,
         kind in {"matrix", "shear", "stress"} and limit is None,
     )
+
+
+def display_scan_frames(frames, scans, *, range_from_last_frame):
+    scan_bounds, scan_min, scan_max, scan_signed = scans
+    if not scan_bounds and range_from_last_frame:
+        frames = frames[-1:]
+    for index, frame in enumerate(frames):
+        colours = (scan_min or scan_max or scan_signed) and (
+            not range_from_last_frame or index == len(frames) - 1)
+        if scan_bounds or colours:
+            yield frame, colours
 
 
 def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloured_mesh,
@@ -517,14 +541,12 @@ def render(folder, output, spec, frames=None):
     fps = spec["fps"]
     schedule = frame_schedule(frames, playback=spec["playback"], fps=fps,
                               seconds_per_load=spec["seconds_per_load"], minimum_seconds=spec["minimum_seconds"])
-    scan_indices = tuple(dict.fromkeys(schedule))
+    scheduled = [frames[index] for index in dict.fromkeys(schedule)]
     counts = Counter(schedule)
     if preview:
-        position = spec.get("preview_frame", "first")
-        if position not in {"first", "middle"}:
-            raise ValueError("Choose the first or middle animation frame.")
-        counts = {schedule[len(schedule) // 2 if position == "middle" else 0]: 1}
+        counts = {preview_frame_index(schedule, spec.get("preview_frame", "first")): 1}
     limit = spec.get("limit")
+    range_from_last_frame = spec.get("range_from_last_frame", True)
     lower_limit = spec.get("energy_min", 0.) if kind == "energy" else None
     if limit is not None and (not np.isfinite(limit) or kind != "energy" and limit <= 0):
         raise ValueError("The colour limit must be finite, and positive for a signed field.")
@@ -538,15 +560,15 @@ def render(folder, output, spec, frames=None):
     bounds = np.array([corners.min(axis=0), corners.max(axis=0)]) if tiled else np.array([[np.inf] * 2, [-np.inf] * 2])
     minimum, maximum = np.inf, -np.inf
     csv_bounds, csv_maximum, scans = display_limit_sources(
-        folder, (frames[index] for index in scan_indices),
-        kind=kind, tiled=tiled, limit=limit, lower_limit=lower_limit)
+        folder, scheduled, kind=kind, tiled=tiled, limit=limit, lower_limit=lower_limit,
+        range_from_last_frame=range_from_last_frame)
     if csv_bounds is not None:
         bounds = csv_bounds
     if csv_maximum is not None:
         maximum = csv_maximum
     scan_bounds, scan_min, scan_max, scan_signed = scans
-    scan_colours = scan_min or scan_max or scan_signed
-    if scan_bounds or scan_colours:
+    scan_frames = list(display_scan_frames(scheduled, scans, range_from_last_frame=range_from_last_frame))
+    if scan_frames:
         signed_field = {"matrix": f"{matrix} matrix components", "shear": "integer shear",
                         "stress": f"Cauchy stress σ{STRESS_COMPONENTS[stress_component]}"}
         quantities = [label for needed, label in (
@@ -554,17 +576,17 @@ def render(folder, output, spec, frames=None):
             (scan_max, "maximum element energy"),
             (scan_signed, f"maximum absolute {signed_field.get(kind, '')}"),
         ) if needed]
-        print(f"Scanning {len(scan_indices)} mesh states for fixed display limits ({', '.join(quantities)}).",
+        print(f"Scanning {len(scan_frames)} mesh states for fixed display limits ({', '.join(quantities)}).",
               file=sys.stderr, flush=True)
-        for index in scan_indices:
-            _, _, polygons, values = read_frame(folder, frames[index], kind if scan_colours else "none", matrix, config,
+        for frame, scan_colours in scan_frames:
+            _, _, polygons, values = read_frame(folder, frame, kind if scan_colours else "none", matrix, config,
                                                 stress_component=stress_component)
             if scan_bounds:
                 bounds[0] = np.minimum(bounds[0], polygons.min(axis=(0, 1)))
                 bounds[1] = np.maximum(bounds[1], polygons.max(axis=(0, 1)))
-            if scan_min or scan_signed:
+            if scan_colours and (scan_min or scan_signed):
                 minimum = min(minimum, values.min())
-            if scan_max or scan_signed:
+            if scan_colours and (scan_max or scan_signed):
                 maximum = max(maximum, values.max())
     if kind != "disk" and show_border:
         bounds += np.array([[-.02], [.02]]) * (bounds[1] - bounds[0])

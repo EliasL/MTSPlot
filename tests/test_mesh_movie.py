@@ -1,18 +1,50 @@
-"""Numerical checks for periodic coverage and playback time."""
+"""Numerical checks for mesh animation."""
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from MTS_Plotting.dislocations import circuit_charges, delaunay_dislocations, dislocation_candidates, dislocation_segments
 from MTS_Plotting.mesh_geometry import periodic_basis, reduce_basis, visible_periodic_images
-from MTS_Plotting.mesh_movie import csv_display_limits, frame_schedule, node_classes, opacity_values
+from MTS_Plotting.mesh_movie import display_limit_sources, frame_schedule, node_classes, opacity_values, render
 from MTS_Plotting.render_capacity import worker_count
 
 
 class MeshMovieTests(unittest.TestCase):
+    def test_first_frame_preview_uses_last_vtu_energy_range_by_default(self):
+        import meshio
+        from MTS_Management.config import Config
+
+        with TemporaryDirectory() as temporary:
+            config = Config()
+            folder = Path(temporary) / config.folder_name()
+            (folder / "data").mkdir(parents=True)
+            config.write(folder / "config.conf")
+            (folder / "manifest.json").write_text(json.dumps({
+                "settings": config.as_dict(), "config_hash": config.config_hash,
+            }))
+            (folder / "macroData.csv").write_text(
+                "load_step,load,minX,minY,maxX,maxY,max_energy\n"
+                "0,0,0,0,1,1,9\n"
+                "1,1,0,0,1,1,2\n")
+            points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
+            cells = [("triangle", np.array([[0, 1, 2]]))]
+            for step, energy in enumerate((9., 2.)):
+                mesh = meshio.Mesh(points, cells, cell_data={"energy_field": [np.array([energy])]})
+                mesh.write(folder / "data" / f"mesh_load={step}_nrM=0_.{step}.vtu")
+            spec = dict(kind="energy", matrix="T", tiling="cell", playback="saved", fps=1,
+                        seconds_per_load=1, minimum_seconds=1, preview=True, preview_frame="first",
+                        show_title=False, dpi=100)
+            with patch("matplotlib.image.imsave"):
+                latest = render(folder, folder / "preview.png", spec)
+                full = render(folder, folder / "preview.png", spec | {"range_from_last_frame": False})
+            self.assertEqual(latest["energy_range"], (0., 2.))
+            self.assertEqual(full["energy_range"], (0., 9.))
+
     def test_display_limits_follow_selected_saved_frames(self):
         frames = [{"step": 2, "load": .001}, {"step": 4, "load": .003}]
         with TemporaryDirectory() as temporary:
@@ -23,13 +55,18 @@ class MeshMovieTests(unittest.TestCase):
                 "2,0.001,-1,0,5,3,0.4\n"
                 "3,0.002,-9,-9,20,20,90\n"
                 "4,0.003,-2,1,4,7,0.7\n")
-            bounds, maximum = csv_display_limits(root, frames, bounds_needed=True, energy_max_needed=True)
+            limits = {"kind": "energy", "tiled": False, "limit": None, "lower_limit": 0}
+            bounds, maximum, scans = display_limit_sources(root, frames, **limits)
             np.testing.assert_allclose(bounds, [[-2, 0], [5, 7]])
             self.assertEqual(maximum, .7)
+            self.assertFalse(any(scans))
             # Files from an interrupted or resumed run may not share a step/load history.
             frames[1]["load"] = .004
-            self.assertEqual(csv_display_limits(root, frames, bounds_needed=True, energy_max_needed=True),
-                             (None, None))
+            frames.append({"step": 6, "load": .005})
+            bounds, maximum, scans = display_limit_sources(root, frames, **limits)
+            np.testing.assert_allclose(bounds, [[-1, 0], [5, 3]])
+            self.assertEqual(maximum, .4)
+            self.assertFalse(any(scans))
 
     def test_opacity_interpolates_and_extends_the_endpoint_values(self):
         positions = np.array([0., .25, .5, .75, 1.])
