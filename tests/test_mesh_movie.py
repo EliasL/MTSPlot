@@ -1,16 +1,36 @@
 """Numerical checks for periodic coverage and playback time."""
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 import numpy as np
 
 from MTS_Plotting.dislocations import circuit_charges, delaunay_dislocations, dislocation_candidates, dislocation_segments
 from MTS_Plotting.mesh_geometry import periodic_basis, reduce_basis, visible_periodic_images
-from MTS_Plotting.mesh_movie import frame_schedule, node_classes, opacity_values
+from MTS_Plotting.mesh_movie import csv_display_limits, frame_schedule, node_classes, opacity_values
 from MTS_Plotting.render_capacity import worker_count
 
 
 class MeshMovieTests(unittest.TestCase):
+    def test_display_limits_follow_selected_saved_frames(self):
+        frames = [{"step": 2, "load": .001}, {"step": 4, "load": .003}]
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            csv = root / "macroData.csv"
+            csv.write_text(
+                "load_step,load,minX,minY,maxX,maxY,max_energy\n"
+                "2,0.001,-1,0,5,3,0.4\n"
+                "3,0.002,-9,-9,20,20,90\n"
+                "4,0.003,-2,1,4,7,0.7\n")
+            bounds, maximum = csv_display_limits(root, frames, bounds_needed=True, energy_max_needed=True)
+            np.testing.assert_allclose(bounds, [[-2, 0], [5, 7]])
+            self.assertEqual(maximum, .7)
+            # Files from an interrupted or resumed run may not share a step/load history.
+            frames[1]["load"] = .004
+            self.assertEqual(csv_display_limits(root, frames, bounds_needed=True, energy_max_needed=True),
+                             (None, None))
+
     def test_opacity_interpolates_and_extends_the_endpoint_values(self):
         positions = np.array([0., .25, .5, .75, 1.])
         np.testing.assert_allclose(opacity_values(positions, 1, [[.25, .1], [.75, .9]]),

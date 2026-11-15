@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 
-from MTS_Management.data import MESH_SNAPSHOT, mesh_snapshots, read_vtu
+from MTS_Management.data import MESH_SNAPSHOT, macro_reader, mesh_snapshots, read_vtu
 from MTS_Management.errors import EXPECTED_ERROR_EXIT, EXPECTED_ERROR_FORMAT, ExpectedError
 
 from .dislocations import DEFAULT_BOND_TOLERANCE, delaunay_dislocations, dislocation_candidates, dislocation_segments
@@ -27,6 +27,7 @@ from .render_capacity import automatic_workers, peak_memory
 from .runs import Run
 
 MATRICES = ("T", "T_p", "F", "F_E", "F_P")
+STRESS_COMPONENTS = {"11": "xx", "12": "xy", "22": "yy"}
 HEATMAPS = ("inferno", "viridis", "magma", "coolwarm")
 VIDEO_DPI = (100, 200, 300)
 NODE_COLOURS = {"Fixed": "#2a3857", "Free": "#d24646", "Displaced": "#d69220"}
@@ -70,7 +71,7 @@ def encoder_path(preferred=None):
     return path
 
 
-def read_frame(folder, frame, kind, matrix, config):
+def read_frame(folder, frame, kind, matrix, config, *, stress_component="12"):
     mesh = read_vtu(folder / "data" / frame["name"])
     points = np.asarray(mesh.mesh.points[:, :2], dtype=float)
     triangles = points[mesh.cells]
@@ -78,6 +79,12 @@ def read_frame(folder, frame, kind, matrix, config):
         raise ValueError(f"Invalid mesh coordinates in {frame['name']}.")
     if kind == "energy":
         values = mesh.field("energy_field")[:, None]
+    elif kind == "stress":
+        field = "sigma" + stress_component
+        if field not in mesh.mesh.cell_data:
+            raise ExpectedError(f"{frame['name']} lacks Cauchy stress σ{STRESS_COMPONENTS[stress_component]}. "
+                                "Choose a component available in the saved mesh fields.")
+        values = mesh.field(field)[:, None]
     elif kind == "shear":
         branch = "F_P" if config["reconnectionMethod"] == "none" else "T_p"
         values = integer_shears(mesh.matrix(branch))
@@ -158,18 +165,79 @@ def opacity_values(positions, opacity, curve):
 def energy_limits(minimum, maximum, lower_limit, upper_limit):
     lower = min(0., minimum) if lower_limit is None else lower_limit
     upper = maximum if upper_limit is None else upper_limit
-    if upper_limit is None and upper <= lower and lower_limit is None:
+    if upper_limit is None and upper <= lower and (lower_limit is None or lower == 0):
         upper = lower + 1.
     if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
         raise ExpectedError("Choose an upper energy limit greater than the lower limit.")
     return lower, upper
 
 
+def csv_display_limits(folder, frames, *, bounds_needed, energy_max_needed):
+    """Use accepted-state statistics only if every selected frame has a matching row."""
+    if not bounds_needed and not energy_max_needed:
+        return None, None
+    selected = {frame["step"]: frame["load"] for frame in frames}
+    data = {}
+    try:
+        with (folder / "macroData.csv").open(newline="") as stream:
+            reader = macro_reader(stream, allow_incomplete_tail=True)
+            columns = reader.fieldnames or ()
+            if len(set(columns)) != len(columns) or not {"load_step", "load"} <= set(columns):
+                return None, None
+            coordinates = ("minX", "minY", "maxX", "maxY")
+            bounds_needed = bounds_needed and set(coordinates) <= set(columns)
+            energy_max_needed = energy_max_needed and "max_energy" in columns
+            names = (coordinates if bounds_needed else ()) + (("max_energy",) if energy_max_needed else ())
+            if not names:
+                return None, None
+            for row in reader:
+                step = int(row["load_step"])
+                if step not in selected:
+                    continue
+                if step in data or not math.isclose(float(row["load"]), selected[step],
+                                                    rel_tol=1e-10, abs_tol=5.01e-7):
+                    return None, None
+                data[step] = [float(row[name]) for name in names]
+    except (FileNotFoundError, TypeError, ValueError):
+        return None, None
+    if data.keys() != selected.keys() or not data:
+        return None, None
+    values = np.array(list(data.values()))
+    if not np.all(np.isfinite(values)):
+        return None, None
+    bounds = None
+    if bounds_needed and np.all(values[:, 2:4] >= values[:, :2]):
+        bounds = np.array([values[:, :2].min(axis=0), values[:, 2:4].max(axis=0)])
+        # The macro writer uses 11 significant digits. Expand rounded bounds
+        # outwards so the contained mesh is visible with no display padding.
+        bounds += np.array([[-1.], [1.]]) * (1e-10 * np.abs(bounds))
+    maximum = float(values[:, -1].max()) if energy_max_needed else None
+    # max_energy is initialized to zero before reducing the element energies.
+    return bounds, maximum if maximum is not None and maximum > 0 else None
+
+
+def tiled_display(config, kind, tiling):
+    return kind != "disk" and (tiling == "tile" or (tiling == "auto" and config["boundary"] == "periodic"))
+
+
+def display_limit_sources(folder, frames, *, kind, tiled, limit, lower_limit):
+    bounds_needed = kind != "disk" and not tiled
+    energy_max_needed = kind == "energy" and limit is None
+    bounds, maximum = csv_display_limits(folder, frames, bounds_needed=bounds_needed,
+                                        energy_max_needed=energy_max_needed)
+    return bounds, maximum, (
+        bounds_needed and bounds is None,
+        kind == "energy" and lower_limit is None,
+        energy_max_needed and maximum is None,
+        kind in {"matrix", "shear", "stress"} and limit is None,
+    )
+
+
 def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloured_mesh,
                    with_nodes, with_edges, node_scale, node_colours, cmap, limit, minimum, maximum,
                    dpi, show_legend, legend_scale, show_border, show_title, title_size,
                    defect_lattice, defect_method, bond_tolerance, dislocation_scale, dislocation_width,
-                   energy_range, opacity, opacity_curve):
+                   energy_range, opacity, opacity_curve, stress_component):
     from matplotlib import colormaps
     from matplotlib import pyplot as plt
     from matplotlib.collections import LineCollection, PolyCollection
@@ -226,7 +294,8 @@ def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloure
             for ax, collection, direction in zip(axes, artists, ("h", "v"), strict=True):
                 colourbars.append(fig.colorbar(collection, ax=ax, shrink=.76, label=rf"$n_{direction}$"))
         elif show_legend:
-            label = r"$E_i$" if kind == "energy" else rf"$({matrix})_{{ij}}$"
+            label = {"energy": r"$E_i$", "stress": rf"$\sigma_{{{STRESS_COMPONENTS[stress_component]}}}$"}.get(
+                kind, rf"$({matrix})_{{ij}}$")
             colourbars.append(fig.colorbar(artists[0], ax=axes.tolist(), orientation="horizontal", shrink=.5, label=label))
     edge_artists, node_artists, defect_artists = [], [], []
     node_radius = 3 / 7 * node_scale if with_nodes else 0.
@@ -270,7 +339,8 @@ def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloure
         nodes.set_sizes([diameter ** 2])
 
     def draw(index, frame):
-        mesh, points, polygons, values = read_frame(folder, frame, kind, matrix, config)
+        mesh, points, polygons, values = read_frame(folder, frame, kind, matrix, config,
+                                                    stress_component=stress_component)
         areas = triangle_area(polygons)
         if header:
             for text, label in zip(header, frame_labels(frame, index, mesh, areas), strict=True):
@@ -392,9 +462,12 @@ def render(folder, output, spec, frames=None):
     config = {key: run.config[key] for key in ("rows", "cols", "boundary", "energyFunction",
                                                "bulkModulus", "reconnectionMethod", "deformation")}
     kind, matrix, tiling = spec["kind"], spec["matrix"], spec["tiling"]
-    if kind not in {"none", "energy", "shear", "matrix", "disk"} or matrix not in MATRICES:
+    stress_component = spec.get("stress_component", "12")
+    if kind not in {"none", "energy", "shear", "matrix", "disk", "stress"} or matrix not in MATRICES:
         raise ValueError("Unknown animation type or matrix.")
-    coloured_mesh = kind in {"energy", "shear", "matrix"}
+    if stress_component not in STRESS_COMPONENTS:
+        raise ValueError("Choose a Cauchy stress component: xx, xy or yy.")
+    coloured_mesh = kind in {"energy", "shear", "matrix", "stress"}
     with_nodes = kind != "disk" and spec.get("show_nodes", False)
     with_edges = kind != "disk" and spec.get("show_mesh_lines", False)
     dislocations = kind != "disk" and spec.get("dislocations", False)
@@ -439,7 +512,7 @@ def render(folder, output, spec, frames=None):
         raise ValueError("Unknown tiling option.")
     if kind != "disk" and tiling == "tile" and not periodic:
         raise ExpectedError("Tiling requires periodic boundary conditions.")
-    tiled = kind != "disk" and (tiling == "tile" or tiling == "auto" and config["boundary"] == "periodic")
+    tiled = tiled_display(config, kind, tiling)
     frames = mesh_snapshots(folder) if frames is None else frames
     fps = spec["fps"]
     schedule = frame_schedule(frames, playback=spec["playback"], fps=fps,
@@ -452,7 +525,7 @@ def render(folder, output, spec, frames=None):
             raise ValueError("Choose the first or middle animation frame.")
         counts = {schedule[len(schedule) // 2 if position == "middle" else 0]: 1}
     limit = spec.get("limit")
-    lower_limit = spec.get("energy_min") if kind == "energy" else None
+    lower_limit = spec.get("energy_min", 0.) if kind == "energy" else None
     if limit is not None and (not np.isfinite(limit) or kind != "energy" and limit <= 0):
         raise ValueError("The colour limit must be finite, and positive for a signed field.")
     opacity = spec.get("opacity", 100) / 100
@@ -464,24 +537,42 @@ def render(folder, output, spec, frames=None):
     corners = np.array([[0, 0], cell[:, 0], cell[:, 1], cell.sum(axis=1)])
     bounds = np.array([corners.min(axis=0), corners.max(axis=0)]) if tiled else np.array([[np.inf] * 2, [-np.inf] * 2])
     minimum, maximum = np.inf, -np.inf
-    scan_colours = coloured_mesh and (limit is None or kind == "energy" and lower_limit is None)
-    if kind != "disk" and (not tiled or scan_colours):
-        print(f"Scanning {len(scan_indices)} mesh states for fixed display limits.", file=sys.stderr, flush=True)
+    csv_bounds, csv_maximum, scans = display_limit_sources(
+        folder, (frames[index] for index in scan_indices),
+        kind=kind, tiled=tiled, limit=limit, lower_limit=lower_limit)
+    if csv_bounds is not None:
+        bounds = csv_bounds
+    if csv_maximum is not None:
+        maximum = csv_maximum
+    scan_bounds, scan_min, scan_max, scan_signed = scans
+    scan_colours = scan_min or scan_max or scan_signed
+    if scan_bounds or scan_colours:
+        signed_field = {"matrix": f"{matrix} matrix components", "shear": "integer shear",
+                        "stress": f"Cauchy stress σ{STRESS_COMPONENTS[stress_component]}"}
+        quantities = [label for needed, label in (
+            (scan_bounds, "mesh bounds"), (scan_min, "minimum element energy"),
+            (scan_max, "maximum element energy"),
+            (scan_signed, f"maximum absolute {signed_field.get(kind, '')}"),
+        ) if needed]
+        print(f"Scanning {len(scan_indices)} mesh states for fixed display limits ({', '.join(quantities)}).",
+              file=sys.stderr, flush=True)
         for index in scan_indices:
-            _, _, polygons, values = read_frame(folder, frames[index], kind, matrix, config)
-            if not tiled:
+            _, _, polygons, values = read_frame(folder, frames[index], kind if scan_colours else "none", matrix, config,
+                                                stress_component=stress_component)
+            if scan_bounds:
                 bounds[0] = np.minimum(bounds[0], polygons.min(axis=(0, 1)))
                 bounds[1] = np.maximum(bounds[1], polygons.max(axis=(0, 1)))
-            if scan_colours:
-                minimum, maximum = min(minimum, values.min()), max(maximum, values.max())
+            if scan_min or scan_signed:
+                minimum = min(minimum, values.min())
+            if scan_max or scan_signed:
+                maximum = max(maximum, values.max())
     if kind != "disk" and show_border:
         bounds += np.array([[-.02], [.02]]) * (bounds[1] - bounds[0])
 
     energy_range = energy_limits(minimum, maximum, lower_limit, limit) if kind == "energy" else None
-    if energy_range is not None and scan_colours:
-        automatic = energy_limits(minimum, maximum, None, None)
-        scanned = [energy_range[i] if override is None else automatic[i]
-                   for i, override in enumerate((lower_limit, limit))]
+    if energy_range is not None and (lower_limit is None or limit is None):
+        scanned = [value if override is None else None
+                   for value, override in zip(energy_range, (lower_limit, limit), strict=True)]
         print(ENERGY_RANGE_PROGRESS + json.dumps(scanned), file=sys.stderr, flush=True)
     settings = dict(folder=folder, config=config, kind=kind, matrix=matrix, cell=cell, bounds=bounds,
                     tiled=tiled, coloured_mesh=coloured_mesh, with_nodes=with_nodes, with_edges=with_edges,
@@ -493,7 +584,8 @@ def render(folder, output, spec, frames=None):
                     bond_tolerance=spec.get("dislocation_bond_tolerance", DEFAULT_BOND_TOLERANCE),
                     dislocation_scale=.5 * dislocation_scale,
                     dislocation_width=1.25 * 1.3 * dislocation_thickness,
-                    energy_range=energy_range, opacity=opacity, opacity_curve=opacity_curve)
+                    energy_range=energy_range, opacity=opacity, opacity_curve=opacity_curve,
+                    stress_component=stress_component)
     if workers is not None:
         workers = min(workers, len(counts), os.cpu_count() or 1)
     jobs = ((index, frames[index]) for index in counts)

@@ -18,6 +18,7 @@ LABELS = {
     "size": "System size L", "nrThreads": "Threads", "preconditioner": "Preconditioner",
     "reconnectionMethod": "Reconnection", "seed": "Seed", "load": "Load",
     "avg_energy": "Mean energy density", "total_energy": "Total energy",
+    "indentation_force": "Vertical indenter reaction force",
     "avg_sigma12": "Mean shear stress σ12", "avg_sigma11": "Mean normal stress σ11",
     "avg_sigma22": "Mean normal stress σ22", "avg_P12": "Mean first-Piola stress P12",
     "run_time": "Cumulative runtime (s)", "minimization_time": "Cumulative minimization time (s)",
@@ -26,7 +27,7 @@ REDUCTIONS = {"last": "Final value", "first": "Initial value", "mean": "Mean ove
               "min": "Minimum", "max": "Maximum"}
 ABBREVIATIONS = {"size": "L", "nrThreads": "t", "reconnectionMethod": "R", "preconditioner": "C",
                  "seed": "s", "tangentBackend": "backend", "logDuringMinimization": "diag"}
-COMMON_Y = ["avg_sigma12", "avg_energy", "total_energy", "avg_sigma11", "avg_sigma22",
+COMMON_Y = ["avg_sigma12", "indentation_force", "avg_energy", "total_energy", "avg_sigma11", "avg_sigma22",
             "elastic_minimization_s", "plastic_minimization_s", "first_minimization_s",
             "tangent_preparation_s", "total_runtime_s"]
 APPEARANCE = {"ncols", "legend_loc", "legend_style", "legend_aliases", "xlim", "ylim", "xscale", "yscale", "show_all", "xlabel", "ylabel"}
