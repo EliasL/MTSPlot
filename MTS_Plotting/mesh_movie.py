@@ -31,7 +31,7 @@ STRESS_COMPONENTS = {"11": "xx", "12": "xy", "22": "yy"}
 HEATMAPS = ("inferno", "viridis", "magma", "coolwarm")
 VIDEO_DPI = (100, 200, 300)
 NODE_COLOURS = {"Fixed": "#2a3857", "Free": "#d24646", "Displaced": "#d69220"}
-ENERGY_RANGE_PROGRESS = "Animation energy range: "
+COLOUR_LIMITS_PROGRESS = "Animation colour limits: "
 
 
 def frame_schedule(frames, *, playback, fps, seconds_per_load, minimum_seconds):
@@ -258,7 +258,7 @@ def display_scan_frames(frames, scans, *, range_from_last_frame):
 
 
 def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloured_mesh,
-                   with_nodes, with_edges, node_scale, node_colours, cmap, limit, minimum, maximum,
+                   with_nodes, with_edges, node_scale, node_colours, cmap, magnitude,
                    dpi, show_legend, legend_scale, show_border, show_title, title_size,
                    defect_lattice, defect_method, bond_tolerance, dislocation_scale, dislocation_width,
                    energy_range, opacity, opacity_curve, stress_component):
@@ -299,7 +299,6 @@ def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloure
             ax.contour(x, y, background, levels=(.01, .03, .06, .1), colors=".78", linewidths=.55)
         artist = ax.scatter([], [], s=2, linewidths=0, color="#23608e", alpha=.3)
     elif coloured_mesh:
-        magnitude = limit or max(abs(minimum), abs(maximum)) or 1.
         norm = Normalize(*energy_range) if kind == "energy" else Normalize(-magnitude, magnitude)
         if opacity_curve is not None or opacity != 1:
             positions = np.linspace(0, 1, 1024)
@@ -307,7 +306,6 @@ def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloure
             colours[:, 3] = opacity_values(positions, opacity, opacity_curve)
             cmap = ListedColormap(colours)
         if kind == "shear":
-            magnitude = int(np.ceil(magnitude))
             step = max(1, int(np.ceil(magnitude / 63)))
             norm = BoundaryNorm(np.arange(-magnitude - .5, magnitude + step + .5, step), 256)
         for ax in axes:
@@ -592,14 +590,22 @@ def render(folder, output, spec, frames=None):
         bounds += np.array([[-.02], [.02]]) * (bounds[1] - bounds[0])
 
     energy_range = energy_limits(minimum, maximum, lower_limit, limit) if kind == "energy" else None
-    if energy_range is not None and (lower_limit is None or limit is None):
+    magnitude = None
+    if coloured_mesh and kind != "energy":
+        magnitude = limit or max(abs(minimum), abs(maximum)) or 1.
+        if kind == "shear":
+            magnitude = math.ceil(magnitude)
+    if energy_range is not None:
         scanned = [value if override is None else None
                    for value, override in zip(energy_range, (lower_limit, limit), strict=True)]
-        print(ENERGY_RANGE_PROGRESS + json.dumps(scanned), file=sys.stderr, flush=True)
+    else:
+        scanned = [None, magnitude if scan_signed else None]
+    if any(value is not None for value in scanned):
+        print(COLOUR_LIMITS_PROGRESS + json.dumps(scanned), file=sys.stderr, flush=True)
     settings = dict(folder=folder, config=config, kind=kind, matrix=matrix, cell=cell, bounds=bounds,
                     tiled=tiled, coloured_mesh=coloured_mesh, with_nodes=with_nodes, with_edges=with_edges,
-                    node_scale=node_scale, node_colours=node_colours, cmap=cmap, limit=limit,
-                    minimum=minimum, maximum=maximum, dpi=dpi, show_legend=show_legend,
+                    node_scale=node_scale, node_colours=node_colours, cmap=cmap, magnitude=magnitude,
+                    dpi=dpi, show_legend=show_legend,
                     legend_scale=legend_scale, show_border=show_border,
                     show_title=show_title, title_size=title_size,
                     defect_lattice=defect_lattice, defect_method=defect_method,

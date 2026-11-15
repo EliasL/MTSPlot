@@ -1,5 +1,7 @@
 """Numerical checks for mesh animation."""
 
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,12 +12,14 @@ import numpy as np
 
 from MTS_Plotting.dislocations import circuit_charges, delaunay_dislocations, dislocation_candidates, dislocation_segments
 from MTS_Plotting.mesh_geometry import periodic_basis, reduce_basis, visible_periodic_images
-from MTS_Plotting.mesh_movie import display_limit_sources, frame_schedule, node_classes, opacity_values, render
+from MTS_Plotting.mesh_movie import (
+    COLOUR_LIMITS_PROGRESS, display_limit_sources, frame_schedule, node_classes, opacity_values, render,
+)
 from MTS_Plotting.render_capacity import worker_count
 
 
 class MeshMovieTests(unittest.TestCase):
-    def test_first_frame_preview_uses_last_vtu_energy_range_by_default(self):
+    def test_first_frame_preview_uses_last_vtu_limits_by_default(self):
         import meshio
         from MTS_Management.config import Config
 
@@ -33,8 +37,10 @@ class MeshMovieTests(unittest.TestCase):
                 "1,1,0,0,1,1,2\n")
             points = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
             cells = [("triangle", np.array([[0, 1, 2]]))]
-            for step, energy in enumerate((9., 2.)):
-                mesh = meshio.Mesh(points, cells, cell_data={"energy_field": [np.array([energy])]})
+            for step, (energy, stress) in enumerate(((9., 6.), (2., -.8))):
+                mesh = meshio.Mesh(points, cells, cell_data={
+                    "energy_field": [np.array([energy])], "sigma12": [np.array([stress])],
+                })
                 mesh.write(folder / "data" / f"mesh_load={step}_nrM=0_.{step}.vtu")
             spec = dict(kind="energy", matrix="T", tiling="cell", playback="saved", fps=1,
                         seconds_per_load=1, minimum_seconds=1, preview=True, preview_frame="first",
@@ -42,8 +48,14 @@ class MeshMovieTests(unittest.TestCase):
             with patch("matplotlib.image.imsave"):
                 latest = render(folder, folder / "preview.png", spec)
                 full = render(folder, folder / "preview.png", spec | {"range_from_last_frame": False})
+                progress = StringIO()
+                with redirect_stderr(progress):
+                    render(folder, folder / "preview.png", spec | {"kind": "stress"})
             self.assertEqual(latest["energy_range"], (0., 2.))
             self.assertEqual(full["energy_range"], (0., 9.))
+            limits, = [json.loads(line.removeprefix(COLOUR_LIMITS_PROGRESS))
+                       for line in progress.getvalue().splitlines() if line.startswith(COLOUR_LIMITS_PROGRESS)]
+            self.assertEqual(limits, [None, .8])
 
     def test_display_limits_follow_selected_saved_frames(self):
         frames = [{"step": 2, "load": .001}, {"step": 4, "load": .003}]
