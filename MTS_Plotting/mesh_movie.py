@@ -259,7 +259,8 @@ def display_scan_frames(frames, scans, *, range_from_last_frame):
 
 def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloured_mesh,
                    with_nodes, with_edges, node_scale, node_colours, cmap, magnitude,
-                   dpi, show_legend, legend_scale, show_border, show_title, title_size,
+                   dpi, show_legend, legend_scale, colourbar_position, colourbar_length,
+                   show_border, show_title, title_size,
                    defect_lattice, defect_method, bond_tolerance, dislocation_scale, dislocation_width,
                    energy_range, opacity, opacity_curve, stress_component):
     from matplotlib import colormaps
@@ -312,13 +313,14 @@ def frame_renderer(*, folder, config, kind, matrix, cell, bounds, tiled, coloure
             collection = PolyCollection([], cmap=cmap, norm=norm, edgecolors="none", antialiaseds=False)
             ax.add_collection(collection)
             artists.append(collection)
+        bar_layout = dict(location=colourbar_position, shrink=colourbar_length, pad=.03)
         if show_legend and kind == "shear":
             for ax, collection, direction in zip(axes, artists, ("h", "v"), strict=True):
-                colourbars.append(fig.colorbar(collection, ax=ax, shrink=.76, label=rf"$n_{direction}$"))
+                colourbars.append(fig.colorbar(collection, ax=ax, label=rf"$n_{direction}$", **bar_layout))
         elif show_legend:
             label = {"energy": r"$E_i$", "stress": rf"$\sigma_{{{STRESS_COMPONENTS[stress_component]}}}$"}.get(
                 kind, rf"$({matrix})_{{ij}}$")
-            colourbars.append(fig.colorbar(artists[0], ax=axes.tolist(), orientation="horizontal", shrink=.5, label=label))
+            colourbars.append(fig.colorbar(artists[0], ax=axes.tolist(), label=label, **bar_layout))
     edge_artists, node_artists, defect_artists = [], [], []
     node_radius = 3 / 7 * node_scale if with_nodes else 0.
     for ax in axes:
@@ -501,6 +503,12 @@ def render(folder, output, spec, frames=None):
         raise ValueError("Node size must be a finite, positive percentage.")
     if not np.isfinite(legend_scale) or legend_scale <= 0:
         raise ValueError("Legend size must be a finite, positive percentage.")
+    colourbar_position = spec.get("colourbar_position", "auto")
+    colourbar_size = spec.get("colourbar_size", 45)
+    if colourbar_position not in ("auto", "right", "bottom"):
+        raise ExpectedError("Set the colour bar position to Auto, Right or Below in Appearance.")
+    if type(colourbar_size) not in (int, float) or not 1 <= colourbar_size <= 100:
+        raise ExpectedError("Set the colour bar size to a percentage between 1 and 100 in Appearance.")
     workers = spec.get("workers")
     if workers is not None and (type(workers) is not int or not 1 <= workers <= 8):
         raise ValueError("Choose between one and eight frame workers.")
@@ -605,8 +613,10 @@ def render(folder, output, spec, frames=None):
     settings = dict(folder=folder, config=config, kind=kind, matrix=matrix, cell=cell, bounds=bounds,
                     tiled=tiled, coloured_mesh=coloured_mesh, with_nodes=with_nodes, with_edges=with_edges,
                     node_scale=node_scale, node_colours=node_colours, cmap=cmap, magnitude=magnitude,
-                    dpi=dpi, show_legend=show_legend,
-                    legend_scale=legend_scale, show_border=show_border,
+                    dpi=dpi, show_legend=show_legend, legend_scale=legend_scale,
+                    colourbar_position="right" if colourbar_position == "auto" else colourbar_position,
+                    colourbar_length=colourbar_size / 100,
+                    show_border=show_border,
                     show_title=show_title, title_size=title_size,
                     defect_lattice=defect_lattice, defect_method=defect_method,
                     bond_tolerance=spec.get("dislocation_bond_tolerance", DEFAULT_BOND_TOLERANCE),
@@ -621,6 +631,20 @@ def render(folder, output, spec, frames=None):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     renderer = frame_renderer(**settings)
+    if colourbar_position == "auto" and coloured_mesh and show_legend:
+        try:
+            below = frame_renderer(**(settings | {"colourbar_position": "bottom"}))
+        except Exception:
+            renderer[1]()
+            raise
+        right_width, right_height = renderer[2]
+        below_width, below_height = below[2]
+        if abs(below_width / below_height - 16 / 9) < abs(right_width / right_height - 16 / 9):
+            renderer[1]()
+            renderer = below
+            settings["colourbar_position"] = "bottom"
+        else:
+            below[1]()
     width, height = renderer[2]
     if preview:
         from matplotlib.image import imsave
